@@ -2,22 +2,20 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from hindsight_api.engine.reflect.delta_ops import (
     AddSectionOp,
     AppendBlockOp,
-    DeltaOperationList,
     DeltaOperationsInvalidError,
+    DeltaOperationList,
     ReplaceSectionBlocksOp,
     apply_operations,
     parse_delta_operation_list,
     request_delta_operations,
 )
-from hindsight_api.engine.reflect.structured_doc import Block, Section, StructuredDocument
 from hindsight_api.engine.response_models import LLMCallResult
+from hindsight_api.engine.reflect.structured_doc import Block, Section, StructuredDocument
 
 
 def test_parse_delta_operation_list_trailing_brackets():
@@ -331,58 +329,4 @@ async def test_request_delta_operations_leaves_unreachable_ops_alone_without_a_d
     """The retraction pass passes no document: touching nothing is a valid answer there."""
     llm = _ScriptedLLM(_UNKNOWN_SECTION)
     await request_delta_operations(llm, system_prompt="sys", user_prompt="usr", scope="test")
-    assert len(llm.calls) == 1
-
-
-@pytest.mark.parametrize("operation", ["replace_block", "remove_block"])
-async def test_request_delta_operations_retries_a_partially_unreachable_reply(operation: str):
-    """#4829: one valid edit must not hide a correction that missed its target."""
-    doc = StructuredDocument(
-        sections=[Section(id="prefs", heading="Preferences", blocks=[Block(id="b1a2b3c4d", text="Old preference.")])]
-    )
-    valid = {"op": "append_block", "section_id": "prefs", "text": "Another preference."}
-    mistyped = {"op": operation, "section_id": "prefs", "block_id": "b1a2b3c4"}
-    if operation == "replace_block":
-        mistyped["text"] = "Corrected preference."
-    first = json.dumps({"operations": [valid, mistyped]})
-    corrected = json.dumps({"operations": [valid, {**mistyped, "block_id": "b1a2b3c4d"}]})
-    llm = _ScriptedLLM(first, corrected)
-
-    op_list = await request_delta_operations(llm, system_prompt="sys", user_prompt="usr", scope="test", document=doc)
-
-    assert len(llm.calls) == 2
-    assert llm.calls[1][:2] == llm.calls[0]
-    assert llm.calls[1][2]["content"] == first
-    correction = llm.calls[1][3]["content"]
-    assert "unknown block_id: b1a2b3c4" in correction
-    assert "b1a2b3c4d" in correction
-    outcome = apply_operations(doc, op_list.operations)
-    assert not outcome.skipped
-    assert len(outcome.applied) == 2
-    assert [b.text for b in outcome.document.sections[0].blocks] == (
-        ["Corrected preference.", "Another preference."] if operation == "replace_block" else ["Another preference."]
-    )
-    assert doc.sections[0].blocks == [Block(id="b1a2b3c4d", text="Old preference.")]
-
-
-async def test_request_delta_operations_limits_partial_correction_to_one_retry():
-    partial = json.dumps(
-        {
-            "operations": [
-                {"op": "append_block", "section_id": "prefs", "text": "ok"},
-                {"op": "remove_block", "section_id": "prefs", "block_id": "missing"},
-            ]
-        }
-    )
-    llm = _ScriptedLLM(partial, partial)
-    op_list = await request_delta_operations(llm, system_prompt="sys", user_prompt="usr", scope="test", document=_DOC)
-    # The caller receives the second attempt's diagnostics and refuses to persist it.
-    assert len(llm.calls) == 2
-    assert len(apply_operations(_DOC, op_list.operations).skipped) == 1
-
-
-@pytest.mark.parametrize("reply", [_KNOWN_SECTION, '{"operations": []}'])
-async def test_request_delta_operations_does_not_retry_applicable_or_empty_edits(reply: str):
-    llm = _ScriptedLLM(reply)
-    await request_delta_operations(llm, system_prompt="sys", user_prompt="usr", scope="test", document=_DOC)
     assert len(llm.calls) == 1

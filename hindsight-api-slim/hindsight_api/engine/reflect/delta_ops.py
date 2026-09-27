@@ -10,9 +10,8 @@ There are two layers of validation here, and they answer differently:
   the model invented is not repaired by keeping the parts that happened to fit.
 - **Reference** (``apply_operations``): does the op name something real? An
   unknown ``section_id`` or ``block_id``, or a block that lives in a different
-  section, is skipped with a debug-friendly reason. The refresh's edit pass retries the
-  whole batch once and refuses to persist a batch with any remaining skips,
-  so failed edits cannot disappear behind a successful refresh watermark.
+  section, is dropped with a debug-friendly reason and the rest still apply —
+  the model addressed a document it misread, which the next refresh sees afresh.
 
 Sections and blocks not mentioned by any op are physically copied through
 unchanged — there is no LLM-mediated re-emission of unchanged text, so prose
@@ -393,28 +392,21 @@ def _correction_prompt(error: Exception, rejected: list[RejectedOperation]) -> s
 
 
 def _unreachable_correction_prompt(skipped: list[dict[str, Any]], document: StructuredDocument) -> str:
-    """The follow-up turn when any operation could not be applied to the document."""
+    """The follow-up turn when every operation pointed at something the document lacks."""
     lines = [
-        "That reply could not be used: one or more operations could not be applied "
-        "to the document. The whole batch was refused, so nothing you sent has been applied.",
+        "That reply could not be used: every operation refers to a section or block "
+        "that is not in the document, so nothing you sent has been applied.",
         "",
         "What failed:",
     ]
     for entry in skipped:
         op = {k: v for k, v in entry.items() if k != "reason"}
         lines.append(f"- {entry.get('reason')}; you sent: {json.dumps(op, ensure_ascii=False, default=str)[:600]}")
-    lines += ["", "The document's sections and block ids are:"]
-    skipped_sections = {entry.get("section_id") for entry in skipped}
-    for section in document.sections:
-        lines.append(f"- {section.id}: {section.heading}")
-        # Repeat only the affected sections' block ids; the full document is
-        # already in the prefix, and unrelated ids needlessly grow the retry.
-        if section.id in skipped_sections:
-            lines.append(f"  block ids: {', '.join(block.id for block in section.blocks) or '(none)'}")
+    lines += ["", "The document's sections are:"]
+    lines += [f"- {section.id}: {section.heading}" for section in document.sections]
     lines += [
         "",
-        "Send the COMPLETE list again, including the operations that were valid, "
-        "with every section_id and block_id copied "
+        "Send the COMPLETE list again, with every section_id and block_id copied "
         "exactly from the document above, as a single JSON object with one key, "
         "``operations``. Emit no prose outside the JSON object.",
     ]
@@ -451,10 +443,9 @@ async def request_delta_operations(
     prompt and the whole document stay a byte-identical prefix and the provider's
     prompt cache still covers them on the second call.
 
-    ``document``, when given, also refuses a reply that parses but cannot land in
-    full (#4206, #4829). The retry quotes the skipped operations and lists the real
-    section and block ids. The caller must check the second reply before persisting
-    it, preserving the document if any operations still cannot land. Only the
+    ``document``, when given, also refuses a reply that parses but cannot land:
+    every operation names a section or block the document does not have (#4206).
+    The retry quotes those references and lists the real section ids. Only the
     refresh's edit pass passes it — for the retraction pass, touching nothing is a
     legitimate answer.
     """
@@ -470,13 +461,12 @@ async def request_delta_operations(
         if document is None or not op_list.operations:
             return op_list
         outcome = apply_operations(document, op_list.operations)
-        if not outcome.skipped:
+        if outcome.applied:
             return op_list
         logger.warning(
-            "[STRUCTURED_DELTA] %s reply refused (%d of %d op(s) could not be applied); asking again",
+            "[STRUCTURED_DELTA] %s reply refused (all %d op(s) reference missing sections/blocks); asking again",
             scope,
             len(outcome.skipped),
-            len(op_list.operations),
         )
         correction = _unreachable_correction_prompt(outcome.skipped, document)
     retry_messages = [

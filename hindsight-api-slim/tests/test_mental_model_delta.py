@@ -1494,9 +1494,10 @@ class TestDeltaRefreshPlumbing:
                     "text": "Bob joined the team.",
                 },
                 {
-                    "op": "append_block",
-                    "section_id": "does-not-exist",
-                    "text": "Dropped on the floor.",
+                    "op": "replace_block",
+                    "section_id": section_id,
+                    "block_id": structured["structured_content"]["sections"][0]["blocks"][0]["id"][:-1],
+                    "text": "Bob is the lead.",
                 },
             ],
         )

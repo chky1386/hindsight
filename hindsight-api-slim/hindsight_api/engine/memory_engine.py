@@ -18308,15 +18308,13 @@ class MemoryEngine(MemoryEngineInterface):
                         applied=apply_outcome.applied, skipped=apply_outcome.skipped
                     )
                     if apply_outcome.skipped:
-                        # The correction retry was already used. Previously only an
-                        # entirely rejected batch failed here; a partial write moved
-                        # the watermark past evidence whose edit never landed (#4829).
-                        # Refuse the whole batch so that evidence remains available to
-                        # the next refresh, and keep the per-op diagnostics below.
+                        # Previously only fully skipped batches failed. Partial writes
+                        # also advance the watermark past evidence that never landed
+                        # (#4829), so preserve the document and fail the whole refresh.
                         logger.warning(
                             f"[MENTAL_MODELS] Delta refresh for {mental_model_id}: "
-                            f"{len(apply_outcome.skipped)} of {len(op_list.operations)} op(s) were skipped "
-                            "after correction; refusing the batch"
+                            f"{len(apply_outcome.skipped)} of {len(op_list.operations)} op(s) were skipped; "
+                            "refusing the batch"
                         )
                         mode_fallback_reason = "delta_ops_failed" if apply_outcome.applied else "delta_ops_all_skipped"
                     else:
