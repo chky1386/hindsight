@@ -19,9 +19,9 @@ import pytest
 from hindsight_api import LLMConfig
 from hindsight_api.config import _get_raw_config
 from hindsight_api.engine.llm_wrapper import ConfiguredLLMProvider
-from hindsight_api.engine.reflect.delta_ops import DeltaOperationList, request_delta_operations
+from hindsight_api.engine.reflect.delta_ops import DeltaOperationList, apply_operations, request_delta_operations
 from hindsight_api.engine.reflect.prompts import STRUCTURED_DELTA_SYSTEM_PROMPT, build_structured_delta_prompt
-from hindsight_api.engine.reflect.structured_doc import Block, Section, StructuredDocument
+from hindsight_api.engine.reflect.structured_doc import Block, Section, StructuredDocument, render_document
 from hindsight_api.engine.response_models import LLMCallResult
 from tests.llm_judge import assert_meets_criteria
 
@@ -36,14 +36,15 @@ _REFUSED_REPLY = json.dumps(
 class _FirstReplyPinned:
     """Returns the refused reply first, then hands every later call to the real model."""
 
-    def __init__(self, real: ConfiguredLLMProvider) -> None:
+    def __init__(self, real: ConfiguredLLMProvider, first_reply: str = _REFUSED_REPLY) -> None:
         self._real = real
+        self._first_reply = first_reply
         self.calls = 0
 
     async def call(self, messages: list[dict[str, Any]], **kwargs: Any) -> LLMCallResult:
         self.calls += 1
         if self.calls == 1:
-            return LLMCallResult(content=_REFUSED_REPLY)
+            return LLMCallResult(content=self._first_reply)
         return await self._real.call(messages, **kwargs)
 
 
@@ -95,4 +96,49 @@ async def test_the_model_repairs_a_refused_reply_from_the_correction():
             "says Carol joined as an SRE. The model's first attempt was refused for an invalid "
             "field and it was asked to send the operations again."
         ),
+    )
+
+
+async def test_the_model_repairs_a_partial_batch_without_losing_valid_edits():
+    document = StructuredDocument(
+        sections=[
+            Section(id="housing", heading="Housing", blocks=[Block(id="b1a2b3c4d", text="Alice lives in Berlin.")])
+        ]
+    )
+    first_reply = json.dumps(
+        {
+            "operations": [
+                {"op": "append_block", "section_id": "housing", "text": "Alice moved from Berlin to Paris."},
+                {
+                    "op": "replace_block",
+                    "section_id": "housing",
+                    "block_id": "b1a2b3c4",
+                    "text": "Alice lives in Paris.",
+                },
+            ]
+        }
+    )
+    user_prompt = build_structured_delta_prompt(
+        current_document_json=document.model_dump_json(),
+        candidate_markdown="Alice now lives in Paris, having moved from Berlin.",
+        supporting_facts=[{"id": "f1", "text": "Alice moved from Berlin to Paris.", "type": "world", "context": None}],
+        source_query="Where does Alice live, and where has she lived before?",
+    )
+    llm = _FirstReplyPinned(LLMConfig.from_env().with_config(_get_raw_config()), first_reply)
+    op_list = await request_delta_operations(
+        llm,  # type: ignore[arg-type]  # a pinning shim over the real provider
+        system_prompt=STRUCTURED_DELTA_SYSTEM_PROMPT,
+        user_prompt=user_prompt,
+        scope="test_delta_partial_retry",
+        document=document,
+        response_format=DeltaOperationList,
+        skip_validation=True,
+    )
+    assert llm.calls == 2
+    outcome = apply_operations(document, op_list.operations)
+    assert not outcome.skipped
+    await assert_meets_criteria(
+        response=render_document(outcome.document),
+        criteria="Alice's current home is Paris, Berlin is her former home, and her move from Berlin to Paris is preserved.",
+        context="The original page said Alice lives in Berlin. A new fact says she moved from Berlin to Paris.",
     )

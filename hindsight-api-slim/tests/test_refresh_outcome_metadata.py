@@ -444,14 +444,13 @@ _OUTCOME_CASES = [
         ),
     ),
     _OutcomeCase(
-        id="delta_applies_some_and_rejects_others",
+        id="delta_rejects_partial_batch",
         mode="delta",
         reflect_text="# Team\n\nNarrow candidate.\n",
         delta_returns=[_VALID_OP, _UNKNOWN_SECTION_OP],
-        expect_outcome="content_written",
-        expect_ops_applied=1,
-        expect_ops_skipped=1,
-        why="a partial apply still changes the document; the rejected op is recorded, not fatal",
+        expect_outcome="refresh_failed_delta_not_applied",
+        expect_failure_reason="delta_ops_failed",
+        why="a partial batch must not advance the watermark past evidence whose edit never landed",
     ),
     _OutcomeCase(
         id="delta_window_empty",

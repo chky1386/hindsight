@@ -1443,19 +1443,14 @@ class TestDeltaRefreshPlumbing:
 
         await memory.delete_bank(bank_id, request_context=request_context)
 
-    async def test_delta_partial_skip_applies_the_rest_and_records_it(
+    async def test_delta_partial_skip_preserves_document_and_watermarks(
         self,
         memory: MemoryEngine,
         request_context: RequestContext,
         patch_reflect,
         patch_llm_call,
     ):
-        """One bad op must not sink the whole refresh — but it must be visible.
-
-        Most of the new facts still reach the document, so the refresh proceeds;
-        the rejected op is recorded on the model so a human can see that part of
-        this run's evidence never landed.
-        """
+        """#4829: an unresolved edit must not move its evidence out of the next delta window."""
         bank_id = f"test-delta-partial-skip-{uuid.uuid4().hex[:8]}"
         await memory.ensure_bank_profile(bank_id, request_context=request_context)
 
@@ -1505,18 +1500,24 @@ class TestDeltaRefreshPlumbing:
                 },
             ],
         )
-        refreshed = await memory.refresh_mental_model(
+        from hindsight_api.engine.memory_engine import MentalModelRefreshError
+
+        with pytest.raises(MentalModelRefreshError):
+            await memory.refresh_mental_model(
+                bank_id=bank_id, mental_model_id=mm["id"], request_context=request_context
+            )
+        preserved = await memory.get_mental_model(
             bank_id=bank_id, mental_model_id=mm["id"], request_context=request_context
         )
-
-        assert "Bob joined the team." in refreshed["content"]
-        assert "Alice is the lead." in refreshed["content"], "surviving op must not disturb existing content"
-        assert refreshed["content"] != seeded["content"]
-        rr = refreshed.get("reflect_response") or {}
-        assert rr.get("delta_applied") is True
+        assert preserved["content"] == seeded["content"]
+        assert preserved["structured_content"] == structured["structured_content"]
+        assert preserved["last_refreshed_at"] == seeded["last_refreshed_at"]
+        assert preserved["last_memory_seen_at"] == seeded["last_memory_seen_at"]
+        rr = preserved.get("reflect_response") or {}
+        assert rr.get("delta_applied") is False
         assert len(rr.get("delta_operations_applied") or []) == 1
         assert len(rr.get("delta_operations_skipped") or []) == 1
-        assert "refresh_skipped" not in rr
+        assert rr.get("refresh_skipped") == "delta_ops_failed"
 
         await memory.delete_bank(bank_id, request_context=request_context)
 

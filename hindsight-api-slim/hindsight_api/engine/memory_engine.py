@@ -18307,18 +18307,18 @@ class MemoryEngine(MemoryEngineInterface):
                     delta_operations = MentalModelDeltaOperations(
                         applied=apply_outcome.applied, skipped=apply_outcome.skipped
                     )
-                    if op_list.operations and not apply_outcome.applied:
-                        # Every op the model emitted was rejected (unknown section_id,
-                        # index out of range, name collision), so the document is
-                        # unchanged. Persisting it would look like a clean refresh
-                        # while advancing the watermark past facts that never landed —
-                        # they would fall outside every future delta window. Treat it
-                        # as a failed delta, same as an outright error.
+                    if apply_outcome.skipped:
+                        # The correction retry was already used. Previously only an
+                        # entirely rejected batch failed here; a partial write moved
+                        # the watermark past evidence whose edit never landed (#4829).
+                        # Refuse the whole batch so that evidence remains available to
+                        # the next refresh, and keep the per-op diagnostics below.
                         logger.warning(
-                            f"[MENTAL_MODELS] Delta refresh for {mental_model_id}: all "
-                            f"{len(apply_outcome.skipped)} op(s) were skipped, nothing applied"
+                            f"[MENTAL_MODELS] Delta refresh for {mental_model_id}: "
+                            f"{len(apply_outcome.skipped)} of {len(op_list.operations)} op(s) were skipped "
+                            "after correction; refusing the batch"
                         )
-                        mode_fallback_reason = "delta_ops_all_skipped"
+                        mode_fallback_reason = "delta_ops_failed" if apply_outcome.applied else "delta_ops_all_skipped"
                     else:
                         final_structured = apply_outcome.document
                         final_content = render_document(apply_outcome.document)
@@ -18340,12 +18340,6 @@ class MemoryEngine(MemoryEngineInterface):
                             f"applied {len(apply_outcome.applied)} op(s), "
                             f"skipped {len(apply_outcome.skipped)}"
                         )
-                        if apply_outcome.skipped:
-                            warnings.append(
-                                f"{len(apply_outcome.skipped)} of {len(op_list.operations)} delta operation(s) "
-                                "were rejected and their content did not reach the document. See the skipped "
-                                "operations for the reason each was dropped."
-                            )
                 except Exception as exc:
                     logger.warning(
                         f"[MENTAL_MODELS] Structured delta failed for {mental_model_id} "
